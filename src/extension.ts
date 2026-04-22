@@ -1,33 +1,13 @@
 import * as vscode from 'vscode';
-import Anthropic from '@anthropic-ai/sdk';
 
-const SYSTEM_PROMPT = `You are an expert code reviewer. You will receive a JSON payload with three fields: "mode", "language", and "code".
+const OLLAMA_URL = 'http://localhost:11434/api/generate';
+const OLLAMA_MODEL = 'qwen2.5-coder:7b';
 
-Depending on the mode, focus your analysis as follows:
-- CLARIFY: Identify confusing logic, poor naming, unclear intent, and missing context. Suggest how to make the code easier to understand.
-- EFFICIENCY: Find performance bottlenecks, unnecessary allocations, redundant operations, and algorithmic inefficiencies. Suggest optimized alternatives.
-- DOCUMENTATION: Identify missing or incorrect comments, undocumented public APIs, unclear parameter/return types, and missing examples.
-- SECURITY: Find vulnerabilities, injection risks, unsafe operations, insecure data handling, and missing input validation.
+const SYSTEM_PROMPT = `Expert code reviewer. Return ONLY raw JSON, no markdown:
+{"summary":"1-3 sentences","issues":[{"type":"label","severity":"low|medium|high|critical","description":"problem","suggestion":"fix","code_fix":"snippet or null"}],"refactored_code":"improved code"}
+Modes: CLARIFY=readability, EFFICIENCY=performance, DOCUMENTATION=missing docs, OVERSIGHT=security vulnerabilities and unsafe operations. Empty issues array if none.`;
 
-You MUST return a single JSON object — no markdown fences, no prose, no explanation outside the JSON. The object must conform exactly to this schema:
-
-{
-  "summary": "<string: 1–3 sentence overall assessment>",
-  "issues": [
-    {
-      "type": "<string: short label e.g. 'SQL Injection', 'Missing Null Check'>",
-      "severity": "<'low' | 'medium' | 'high' | 'critical'>",
-      "description": "<string: what the problem is>",
-      "suggestion": "<string: how to fix it>",
-      "code_fix": "<string: corrected code snippet, or null if not applicable>"
-    }
-  ],
-  "refactored_code": "<string: full refactored version of the input code>"
-}
-
-If no issues are found, return an empty array for "issues". Always include "refactored_code" with the improved version.`;
-
-type ReviewMode = 'CLARIFY' | 'EFFICIENCY' | 'DOCUMENTATION' | 'SECURITY';
+type ReviewMode = 'CLARIFY' | 'EFFICIENCY' | 'DOCUMENTATION' | 'OVERSIGHT';
 
 interface Issue {
 	type: string;
@@ -43,6 +23,7 @@ interface ReviewResult {
 	refactored_code: string;
 }
 
+//level of problem severity that need to be fixed
 const VALID_SEVERITIES = new Set(['low', 'medium', 'high', 'critical']);
 
 function isReviewResult(val: unknown): val is ReviewResult {
@@ -93,79 +74,56 @@ function createReviewPanel(code: string, fileName: string, language: string, con
 
 	panel.webview.html = getWebviewContent(fileName, language);
 
-	const config = vscode.workspace.getConfiguration('codeReviewBot');
-	const apiKey = config.get<string>('apiKey') || process.env.ANTHROPIC_API_KEY;
-
-	if (!apiKey) {
-		panel.webview.postMessage({
-			type: 'error',
-			message: 'No API key found. Set ANTHROPIC_API_KEY or configure codeReviewBot.apiKey in VS Code settings.',
-		});
-		return;
-	}
-
-	const client = new Anthropic({ apiKey });
-
 	const listener = panel.webview.onDidReceiveMessage(msg => {
 		if (msg.type === 'startReview') {
-			const mode = msg.mode as string;
-			if (mode !== 'CLARIFY' && mode !== 'EFFICIENCY' && mode !== 'DOCUMENTATION' && mode !== 'SECURITY') {
-				panel.webview.postMessage({ type: 'error', message: `Invalid review mode: ${mode}` });
+			const modes = (msg.modes as string[]).filter(
+				m => m === 'CLARIFY' || m === 'EFFICIENCY' || m === 'DOCUMENTATION' || m === 'OVERSIGHT'
+			) as ReviewMode[];
+			if (modes.length === 0) {
+				panel.webview.postMessage({ type: 'error', message: 'No valid modes selected.' });
 				return;
 			}
-			runReview(panel, client, code, language, mode as ReviewMode);
+			runReviews(panel, code, language, modes);
 		}
 	});
 
 	context.subscriptions.push(listener);
 }
 
-async function runReview(
+async function runReviews(
 	panel: vscode.WebviewPanel,
-	client: Anthropic,
 	code: string,
 	language: string,
-	mode: ReviewMode
+	modes: ReviewMode[]
 ): Promise<void> {
-	panel.webview.postMessage({ type: 'reviewing' });
+	panel.webview.postMessage({ type: 'reviewing', modes });
 
-	const userPayload = JSON.stringify({ mode, language, code });
-
-	try {
-		const stream = client.messages.stream({
-			model: 'claude-opus-4-6',
-			max_tokens: 16000,
-			thinking: { type: 'adaptive' },
-			output_config: { effort: 'max' },
-			system: SYSTEM_PROMPT,
-			messages: [{ role: 'user', content: userPayload }],
-		});
-
-		let buffer = '';
-		for await (const event of stream) {
-			if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
-				buffer += event.delta.text;
+	for (const mode of modes) {
+		const userPayload = `MODE:${mode}\nLANG:${language}\n${code}`;
+		try {
+			const response = await fetch(OLLAMA_URL, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ model: OLLAMA_MODEL, system: SYSTEM_PROMPT, prompt: userPayload, stream: false }),
+			});
+			if (!response.ok) throw new Error(`Ollama error ${response.status}: ${await response.text()}`);
+			const json = await response.json() as { response: string };
+			const raw = json.response;
+			// extract first {...} block to handle extra prose around JSON
+			const jsonMatch = raw.match(/\{[\s\S]*\}/);
+			if (!jsonMatch) throw new Error(`No JSON found in response:\n${raw.slice(0, 300)}`);
+			const parsed: unknown = JSON.parse(jsonMatch[0]);
+			if (!isReviewResult(parsed)) {
+				throw new Error(`Schema mismatch. Got:\n${JSON.stringify(parsed, null, 2).slice(0, 400)}`);
 			}
+			panel.webview.postMessage({ type: 'modeResult', mode, data: parsed });
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			panel.webview.postMessage({ type: 'modeError', mode, message });
 		}
-
-		// Strip optional ```json fences
-		const cleaned = buffer.replace(/^```json\s*/i, '').replace(/\s*```$/, '').trim();
-
-		const parsed: unknown = JSON.parse(cleaned);
-		if (!isReviewResult(parsed)) {
-			throw new Error('Claude returned JSON that does not match the expected ReviewResult schema.');
-		}
-
-		panel.webview.postMessage({ type: 'result', data: parsed });
-	} catch (error) {
-		const message =
-			error instanceof Anthropic.APIError
-				? `API Error ${error.status}: ${error.message}`
-				: error instanceof Error
-				? error.message
-				: String(error);
-		panel.webview.postMessage({ type: 'error', message });
 	}
+
+	panel.webview.postMessage({ type: 'allDone' });
 }
 
 function getWebviewContent(fileName: string, language: string): string {
@@ -176,192 +134,351 @@ function getWebviewContent(fileName: string, language: string): string {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Code Review</title>
   <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    /* ================================================================
+       ALL COLORS — edit anything here, nowhere else needed
+       ================================================================
+
+       MODE ACCENTS  (letter color, underline bar, run button, spinner)
+       ---------------------------------------------------------------- */
+    :root {
+      --color-c: #7A1CAC;        /* C — Clarify letter & accent          */
+      --color-o: #7A1CAC;        /* O — Oversight letter & accent         */
+      --color-d: #7A1CAC;        /* D — Documentation letter & accent     */
+      --color-e: #7A1CAC;        /* E — Efficiency letter & accent        */
+
+      /* SEVERITY BADGE BACKGROUNDS */
+      --sev-low-bg:      rgb(149, 246, 132); /* low      badge background            */
+      --sev-med-bg:      #e9c46a; /* medium   badge background            */
+      --sev-high-bg:     #e07b39; /* high     badge background            */
+      --sev-crit-bg:     #f48771; /* critical badge background            */
+
+      /* SEVERITY BADGE TEXT */
+      --sev-low-fg:      #000;    /* low      badge text                  */
+      --sev-med-fg:      #000;    /* medium   badge text                  */
+      --sev-high-fg:     #fff;    /* high     badge text                  */
+      --sev-crit-fg:     #fff;    /* critical badge text                  */
+
+      /* BACKGROUNDS */
+      --bg-body:         var(--vscode-editor-background);
+      --bg-panel:        var(--vscode-sideBar-background, var(--vscode-editor-background));
+      --bg-card:         var(--vscode-editor-inactiveSelectionBackground, transparent);
+      --bg-code:         var(--vscode-textCodeBlock-background);
+      --bg-hover:        var(--vscode-list-hoverBackground);
+      --bg-error:        var(--vscode-inputValidation-errorBackground);
+      --bg-warn:         var(--vscode-inputValidation-warningBackground);
+
+      /* TEXT */
+      --fg-body:         var(--vscode-editor-foreground);
+      --fg-muted:        var(--vscode-descriptionForeground);
+      --fg-btn:          var(--vscode-button-foreground);
+      --fg-badge:        var(--vscode-badge-foreground);
+
+      /* BORDERS */
+      --border:          var(--vscode-panel-border);
+      --border-focus:    var(--vscode-focusBorder);
+      --border-error:    var(--vscode-inputValidation-errorBorder);
+      --border-warn:     var(--vscode-inputValidation-warningBorder);
+
+      /* MISC */
+      --bg-badge:        var(--vscode-badge-background);
+      --bg-run-btn:      var(--vscode-button-background);
+      --ripple-color:    rgba(255,255,255,0.12);
+    }
+    /* ============================================================== */
 
     body {
       font-family: var(--vscode-font-family);
       font-size: var(--vscode-font-size);
-      color: var(--vscode-editor-foreground);
-      background: var(--vscode-editor-background);
-      padding: 16px 20px;
+      color: var(--fg-body);
+      background: var(--bg-body);
+      padding: 20px;
       line-height: 1.6;
+      max-width: 800px;
     }
 
+    /* ── Header ── */
     #header {
       display: flex;
       align-items: center;
-      gap: 10px;
-      padding-bottom: 12px;
-      border-bottom: 1px solid var(--vscode-panel-border);
-      margin-bottom: 16px;
+      gap: 8px;
+      margin-bottom: 20px;
     }
 
     #header h2 {
-      font-size: 14px;
+      font-size: 13px;
       font-weight: 600;
-      color: var(--vscode-editor-foreground);
+      opacity: 0.85;
     }
 
     .badge {
-      font-size: 11px;
+      font-size: 10px;
       padding: 2px 7px;
       border-radius: 10px;
-      background: var(--vscode-badge-background);
-      color: var(--vscode-badge-foreground);
+      background: var(--bg-badge);
+      color: var(--fg-badge);
       font-weight: 500;
+      letter-spacing: 0.03em;
     }
 
-    .badge-mode {
-      background: var(--vscode-button-background);
-      color: var(--vscode-button-foreground);
-    }
-
-    .badge-low    { background: var(--vscode-charts-blue);   color: #fff; }
-    .badge-medium { background: var(--vscode-charts-yellow); color: #000; }
-    .badge-high   { background: var(--vscode-charts-orange); color: #fff; }
-    .badge-critical { background: var(--vscode-charts-red);  color: #fff; }
-
-    /* ── Phase containers ── */
-    #mode-selector, #loading, #result { display: none; }
-    #mode-selector.active, #loading.active, #result.active { display: block; }
-
-    /* ── Mode selector ── */
-    .mode-grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
+    /* ── Toast ── */
+    #toast {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
       gap: 10px;
+      background: var(--bg-warn);
+      border: 1px solid var(--border-warn);
+      border-radius: 4px;
+      padding: 7px 10px 7px 12px;
+      font-size: 12px;
       margin-bottom: 16px;
     }
 
-    .mode-btn {
-      background: var(--vscode-editor-background);
-      border: 1px solid var(--vscode-panel-border);
-      border-radius: 6px;
-      padding: 12px 14px;
-      cursor: pointer;
-      text-align: left;
-      color: var(--vscode-editor-foreground);
-      transition: border-color 0.15s, background 0.15s;
-    }
-
-    .mode-btn:hover {
-      border-color: var(--vscode-focusBorder);
-      background: var(--vscode-list-hoverBackground);
-    }
-
-    .mode-btn.selected {
-      border-color: var(--vscode-button-background);
-      background: var(--vscode-button-secondaryBackground, var(--vscode-list-activeSelectionBackground));
-    }
-
-    .mode-btn .mode-name {
-      font-weight: 600;
-      font-size: 13px;
-      margin-bottom: 4px;
-    }
-
-    .mode-btn .mode-desc {
-      font-size: 11px;
-      color: var(--vscode-descriptionForeground);
-    }
-
-    .run-btn {
-      background: var(--vscode-button-background);
-      color: var(--vscode-button-foreground);
+    #toast button {
+      background: none;
       border: none;
-      border-radius: 4px;
-      padding: 8px 18px;
-      font-size: 13px;
       cursor: pointer;
-      font-family: var(--vscode-font-family);
-    }
-
-    .run-btn:disabled {
-      opacity: 0.45;
-      cursor: not-allowed;
-    }
-
-    .run-btn:not(:disabled):hover {
-      background: var(--vscode-button-hoverBackground);
-    }
-
-    /* ── Loading ── */
-    #loading {
-      display: none;
-      align-items: center;
-      gap: 8px;
+      color: var(--fg-body);
       font-size: 13px;
-      color: var(--vscode-descriptionForeground);
-    }
-
-    #loading.active { display: flex; }
-
-    .spinner {
-      display: inline-block;
-      width: 14px;
-      height: 14px;
-      border: 2px solid var(--vscode-descriptionForeground);
-      border-top-color: var(--vscode-focusBorder);
-      border-radius: 50%;
-      animation: spin 0.8s linear infinite;
+      padding: 0 2px;
+      opacity: 0.65;
       flex-shrink: 0;
     }
 
-    @keyframes spin { to { transform: rotate(360deg); } }
+    #toast button:hover { opacity: 1; }
 
-    /* ── Result ── */
+    /* ── C O D E bar ── */
+    #code-bar {
+      display: flex;
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+      background: var(--bg-panel);
+      transition: border-radius 0.15s ease;
+    }
+
+    #code-bar.panel-open {
+      border-radius: 8px 8px 0 0;
+      border-bottom-color: transparent;
+    }
+
+    .code-btn {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      padding: 22px 8px 18px;
+      background: transparent;
+      border: none;
+      border-right: 1px solid var(--border);
+      cursor: pointer;
+      color: var(--fg-body);
+      opacity: 0.45;
+      transition: opacity 0.15s ease, background 0.15s ease;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .code-btn:last-child { border-right: none; }
+
+    .code-btn:hover {
+      opacity: 0.8;
+      background: var(--bg-hover);
+    }
+
+    .code-btn:focus-visible {
+      outline: 2px solid var(--border-focus);
+      outline-offset: -2px;
+    }
+
+    .code-btn.active { opacity: 1; }
+
+    .code-btn[data-mode="CLARIFY"]       { --accent: var(--color-c); }
+    .code-btn[data-mode="OVERSIGHT"]     { --accent: var(--color-o); }
+    .code-btn[data-mode="DOCUMENTATION"] { --accent: var(--color-d); }
+    .code-btn[data-mode="EFFICIENCY"]    { --accent: var(--color-e); }
+
+    .code-btn.active .letter { color: var(--accent); }
+
+    .code-btn::after {
+      content: '';
+      position: absolute;
+      bottom: 0; left: 0; right: 0;
+      height: 3px;
+      background: var(--accent);
+      transform: scaleX(0);
+      transition: transform 0.2s ease;
+      transform-origin: center;
+    }
+
+    .code-btn.active::after { transform: scaleX(1); }
+
+    .letter {
+      font-size: 38px;
+      font-weight: 800;
+      line-height: 1;
+      letter-spacing: -1px;
+      transition: color 0.15s ease, transform 0.15s ease;
+    }
+
+    .code-btn:hover .letter { transform: translateY(-2px); }
+    .code-btn.active .letter { transform: translateY(-1px); }
+
+    .btn-label {
+      font-size: 9px;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      opacity: 0.65;
+    }
+
+    /* ── Mode panel ── */
+    #mode-panel {
+      border: 1px solid var(--border);
+      border-top: none;
+      border-radius: 0 0 8px 8px;
+      background: var(--bg-panel);
+      margin-bottom: 4px;
+      overflow: hidden;
+    }
+
+    #panel-info {
+      padding: 20px 20px 18px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    #panel-title {
+      font-size: 16px;
+      font-weight: 700;
+      margin-bottom: 10px;
+    }
+
+    #panel-bullets {
+      list-style: none;
+      margin-bottom: 16px;
+    }
+
+    #panel-bullets li {
+      font-size: 12px;
+      color: var(--fg-muted);
+      padding-left: 14px;
+      position: relative;
+      margin-bottom: 3px;
+    }
+
+    #panel-bullets li::before {
+      content: '•';
+      position: absolute;
+      left: 0;
+      opacity: 0.5;
+    }
+
+    #run-btn {
+      background: var(--active-accent, var(--bg-run-btn));
+      color: var(--fg-btn);
+      border: none;
+      border-radius: 5px;
+      padding: 7px 18px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      font-family: var(--vscode-font-family);
+      letter-spacing: 0.02em;
+      transition: opacity 0.15s ease, transform 0.15s ease;
+    }
+
+    #run-btn:hover:not(:disabled) { opacity: 0.85; transform: translateY(-1px); }
+    #run-btn:disabled { opacity: 0.38; cursor: not-allowed; }
+
+    /* ── Output section ── */
+    #output-section {
+      padding: 16px 20px;
+      min-height: 56px;
+    }
+
+    .output-loading {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--fg-muted);
+    }
+
+    .spinner {
+      width: 14px; height: 14px;
+      border: 2px solid transparent;
+      border-top-color: var(--active-accent, var(--border-focus));
+      border-right-color: var(--active-accent, var(--border-focus));
+      border-radius: 50%;
+      animation: spin 0.65s linear infinite;
+      flex-shrink: 0;
+    }
+
+    /* ── Result cards ── */
     .card {
-      background: var(--vscode-editor-inactiveSelectionBackground, var(--vscode-sideBar-background));
-      border: 1px solid var(--vscode-panel-border);
+      background: var(--bg-card);
+      border: 1px solid var(--border);
       border-radius: 6px;
-      padding: 14px 16px;
-      margin-bottom: 12px;
+      padding: 12px 14px;
+      margin-bottom: 10px;
+      animation: cardIn 0.2s ease both;
     }
 
     .card-header {
       display: flex;
       align-items: center;
-      gap: 8px;
-      margin-bottom: 8px;
+      gap: 7px;
+      margin-bottom: 7px;
       flex-wrap: wrap;
     }
 
-    .card-title {
-      font-weight: 600;
-      font-size: 13px;
+    .card-title { font-weight: 600; font-size: 12px; }
+
+    .summary-text { font-size: 12px; line-height: 1.65; }
+
+    .badge-sev {
+      font-size: 9px;
+      padding: 2px 6px;
+      border-radius: 8px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
     }
 
-    .summary-text {
-      font-size: 13px;
-      line-height: 1.6;
-    }
+    .badge-low      { background: var(--sev-low-bg);  color: var(--sev-low-fg); }
+    .badge-medium   { background: var(--sev-med-bg);  color: var(--sev-med-fg); }
+    .badge-high     { background: var(--sev-high-bg); color: var(--sev-high-fg); }
+    .badge-critical { background: var(--sev-crit-bg); color: var(--sev-crit-fg); }
 
-    .issue-description {
+    .issue-desc {
       font-size: 12px;
       margin-bottom: 6px;
-      color: var(--vscode-editor-foreground);
     }
 
     .suggestion-box {
-      background: var(--vscode-textCodeBlock-background);
-      border-left: 3px solid var(--vscode-focusBorder);
+      background: var(--bg-code);
+      border-left: 3px solid var(--active-accent, var(--border-focus));
       border-radius: 0 3px 3px 0;
-      padding: 8px 10px;
-      font-size: 12px;
+      padding: 7px 10px;
+      font-size: 11px;
       margin-bottom: 8px;
     }
 
     .suggestion-label {
-      font-weight: 600;
-      font-size: 11px;
+      font-size: 10px;
+      font-weight: 700;
       text-transform: uppercase;
-      color: var(--vscode-descriptionForeground);
+      letter-spacing: 0.08em;
+      opacity: 0.55;
       margin-bottom: 3px;
     }
 
     pre {
-      background: var(--vscode-textCodeBlock-background);
-      border: 1px solid var(--vscode-panel-border);
+      background: var(--bg-code);
+      border: 1px solid var(--border);
       border-radius: 4px;
       padding: 10px 12px;
       overflow-x: auto;
@@ -370,7 +487,17 @@ function getWebviewContent(fileName: string, language: string): string {
 
     pre code {
       font-family: var(--vscode-editor-font-family, monospace);
-      font-size: 0.88em;
+      font-size: 0.87em;
+    }
+
+    .section-label {
+      font-size: 10px;
+      font-weight: 700;
+      color: var(--fg-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      margin: 14px 0 7px;
+      opacity: 0.7;
     }
 
     .refactored-header {
@@ -380,59 +507,53 @@ function getWebviewContent(fileName: string, language: string): string {
       margin-bottom: 8px;
     }
 
-    .refactored-title {
-      font-weight: 600;
-      font-size: 13px;
-    }
-
     .copy-btn {
-      background: var(--vscode-button-secondaryBackground, var(--vscode-button-background));
-      color: var(--vscode-button-secondaryForeground, var(--vscode-button-foreground));
-      border: 1px solid var(--vscode-panel-border);
-      border-radius: 4px;
-      padding: 3px 10px;
-      font-size: 11px;
-      cursor: pointer;
-      font-family: var(--vscode-font-family);
-    }
-
-    .copy-btn:hover { border-color: var(--vscode-focusBorder); }
-
-    .try-again-btn {
-      margin-top: 14px;
       background: transparent;
-      border: 1px solid var(--vscode-panel-border);
+      color: var(--fg-body);
+      border: 1px solid var(--border);
       border-radius: 4px;
-      padding: 6px 14px;
-      font-size: 12px;
+      padding: 2px 9px;
+      font-size: 10px;
       cursor: pointer;
-      color: var(--vscode-editor-foreground);
       font-family: var(--vscode-font-family);
+      transition: border-color 0.15s;
     }
 
-    .try-again-btn:hover { border-color: var(--vscode-focusBorder); }
-
-    .error-box {
-      background: var(--vscode-inputValidation-errorBackground);
-      border: 1px solid var(--vscode-inputValidation-errorBorder);
-      border-radius: 4px;
-      padding: 10px 14px;
-      font-size: 12px;
-      margin-bottom: 12px;
-    }
-
-    .section-label {
-      font-size: 12px;
-      font-weight: 600;
-      color: var(--vscode-descriptionForeground);
-      text-transform: uppercase;
-      letter-spacing: 0.04em;
-      margin: 16px 0 8px;
-    }
+    .copy-btn:hover { border-color: var(--border-focus); }
 
     .no-issues {
-      font-size: 13px;
-      color: var(--vscode-descriptionForeground);
+      font-size: 12px;
+      color: var(--fg-muted);
+    }
+
+    .error-box {
+      background: var(--bg-error);
+      border: 1px solid var(--border-error);
+      border-radius: 4px;
+      padding: 9px 12px;
+      font-size: 12px;
+    }
+
+    /* ── Ripple ── */
+    .ripple {
+      position: absolute;
+      border-radius: 50%;
+      width: 80px; height: 80px;
+      margin-top: -40px; margin-left: -40px;
+      background: var(--ripple-color);
+      transform: scale(0);
+      animation: ripple-out 0.45s ease-out;
+      pointer-events: none;
+    }
+
+    /* ── Animations ── */
+    @keyframes spin       { to { transform: rotate(360deg); } }
+    @keyframes cardIn     { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+    @keyframes ripple-out { to { transform: scale(4); opacity: 0; } }
+    @keyframes panelIn    { from { opacity: 0; transform: translateY(-5px); } to { opacity: 1; transform: none; } }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
     }
   </style>
 </head>
@@ -442,118 +563,252 @@ function getWebviewContent(fileName: string, language: string): string {
     <span class="badge">${escapeHtml(language)}</span>
   </div>
 
-  <!-- Phase 1: Mode selector -->
-  <div id="mode-selector" class="active">
-    <div class="mode-grid">
-      <button class="mode-btn" data-mode="CLARIFY">
-        <div class="mode-name">CLARIFY</div>
-        <div class="mode-desc">Find confusing logic and improve readability</div>
-      </button>
-      <button class="mode-btn" data-mode="EFFICIENCY">
-        <div class="mode-name">EFFICIENCY</div>
-        <div class="mode-desc">Detect performance bottlenecks and redundant work</div>
-      </button>
-      <button class="mode-btn" data-mode="DOCUMENTATION">
-        <div class="mode-name">DOCUMENTATION</div>
-        <div class="mode-desc">Identify missing or incorrect comments and docs</div>
-      </button>
-      <button class="mode-btn" data-mode="SECURITY">
-        <div class="mode-name">SECURITY</div>
-        <div class="mode-desc">Find vulnerabilities and unsafe operations</div>
-      </button>
+
+  <!-- C O D E bar -->
+  <div id="code-bar" role="tablist" aria-label="Review modes">
+    <button class="code-btn" data-mode="CLARIFY"       role="tab" aria-selected="false" aria-controls="mode-panel" aria-label="Clarify mode">
+      <span class="letter" aria-hidden="true">C</span>
+      <span class="btn-label">Clarify</span>
+    </button>
+    <button class="code-btn" data-mode="OVERSIGHT"     role="tab" aria-selected="false" aria-controls="mode-panel" aria-label="Oversight mode">
+      <span class="letter" aria-hidden="true">O</span>
+      <span class="btn-label">Oversight</span>
+    </button>
+    <button class="code-btn" data-mode="DOCUMENTATION" role="tab" aria-selected="false" aria-controls="mode-panel" aria-label="Document mode">
+      <span class="letter" aria-hidden="true">D</span>
+      <span class="btn-label">Document</span>
+    </button>
+    <button class="code-btn" data-mode="EFFICIENCY"    role="tab" aria-selected="false" aria-controls="mode-panel" aria-label="Efficiency mode">
+      <span class="letter" aria-hidden="true">E</span>
+      <span class="btn-label">Efficiency</span>
+    </button>
+  </div>
+
+  <!-- Mode panel (hidden until a mode is selected) -->
+  <div id="mode-panel" role="tabpanel" hidden>
+    <div id="panel-info">
+      <h2 id="panel-title"></h2>
+      <ul id="panel-bullets"></ul>
+      <button id="run-btn">Run</button>
     </div>
-    <button id="run-btn" class="run-btn" disabled>Run Review</button>
+    <div id="output-section"></div>
   </div>
-
-  <!-- Phase 2: Loading -->
-  <div id="loading">
-    <span class="spinner"></span>
-    <span id="loading-text">Reviewing with Claude...</span>
-  </div>
-
-  <!-- Phase 3: Result -->
-  <div id="result"></div>
 
   <script>
     const vscode = acquireVsCodeApi();
 
-    // ── State machine ──
-    let state = 'idle';
-    let selectedMode = null;
+    const MODES = {
+      CLARIFY: {
+        title: 'Clarify Mode',
+        bullets: [
+          'Analyzes and explains unclear or complex code sections',
+          'Identifies confusing logic, poor naming, and misleading structure',
+        ],
+        runLabel: 'Run',
+      },
+      OVERSIGHT: {
+        title: 'Oversight Mode',
+        bullets: [
+          'Scans code for security vulnerabilities and performance issues',
+          'Detects unsafe operations, injection risks, and missing validation',
+        ],
+        runLabel: 'Run',
+      },
+      DOCUMENTATION: {
+        title: 'Document Mode',
+        bullets: [
+          'Generates inline comments and documentation for functions and classes',
+          'Flags missing or incorrect docs, unclear parameters, and undocumented APIs',
+        ],
+        runLabel: 'Run',
+      },
+      EFFICIENCY: {
+        title: 'Efficiency Mode',
+        bullets: [
+          'Suggests algorithmic improvements and code refactors',
+          'Detects redundant operations, unnecessary allocations, and bottlenecks',
+        ],
+        runLabel: 'Run',
+      },
+    };
 
-    const modeSelectorEl = document.getElementById('mode-selector');
-    const loadingEl = document.getElementById('loading');
-    const resultEl = document.getElementById('result');
-    const runBtn = document.getElementById('run-btn');
-    const loadingText = document.getElementById('loading-text');
+    // Per-mode result cache: mode -> { status: 'idle'|'loading'|'done'|'error', html, copyHooks }
+    const cache = {};
+    Object.keys(MODES).forEach(m => { cache[m] = { status: 'idle', html: '', copyHooks: [] }; });
 
-    function setState(s) {
-      state = s;
-      modeSelectorEl.className = s === 'idle' ? 'active' : '';
-      loadingEl.className = s === 'reviewing' ? 'active' : '';
-      resultEl.className = s === 'done' ? 'active' : '';
+    let activeMode = null;
+    let isRunning = false;
+
+    const codeBar     = document.getElementById('code-bar');
+    const modePanel   = document.getElementById('mode-panel');
+    const panelTitle  = document.getElementById('panel-title');
+    const panelBullets = document.getElementById('panel-bullets');
+    const runBtn      = document.getElementById('run-btn');
+    const outputSection = document.getElementById('output-section');
+
+    // ── Helpers ──
+    function escapeHtml(str) {
+      return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+
+    function getAccentVar(mode) {
+      const map = {
+        CLARIFY:       'var(--color-c)',
+        OVERSIGHT:     'var(--color-o)',
+        DOCUMENTATION: 'var(--color-d)',
+        EFFICIENCY:    'var(--color-e)',
+      };
+      return map[mode] || 'var(--vscode-button-background)';
+    }
+
+    function addRipple(btn, e) {
+      const r = document.createElement('span');
+      r.className = 'ripple';
+      const rect = btn.getBoundingClientRect();
+      r.style.left = (e.clientX - rect.left) + 'px';
+      r.style.top  = (e.clientY - rect.top)  + 'px';
+      btn.appendChild(r);
+      r.addEventListener('animationend', () => r.remove());
     }
 
     // ── Mode selection ──
-    document.querySelectorAll('.mode-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
-        document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('selected'));
-        btn.classList.add('selected');
-        selectedMode = btn.getAttribute('data-mode');
-        runBtn.disabled = false;
+    document.querySelectorAll('.code-btn').forEach(btn => {
+      btn.addEventListener('click', e => {
+        addRipple(btn, e);
+        const mode = btn.getAttribute('data-mode');
+        if (activeMode === mode && !modePanel.hidden) return; // already open
+        openMode(mode);
+      });
+
+      btn.addEventListener('keydown', e => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); btn.click(); }
       });
     });
 
-    runBtn.addEventListener('click', () => {
-      if (!selectedMode) return;
-      loadingText.textContent = 'Reviewing with Claude (' + selectedMode + ' mode)...';
-      setState('reviewing');
-      vscode.postMessage({ type: 'startReview', mode: selectedMode });
+    function openMode(mode) {
+      // Update bar buttons
+      document.querySelectorAll('.code-btn').forEach(b => {
+        const selected = b.getAttribute('data-mode') === mode;
+        b.classList.toggle('active', selected);
+        b.setAttribute('aria-selected', selected ? 'true' : 'false');
+      });
+
+      codeBar.classList.add('panel-open');
+      modePanel.hidden = false;
+
+      // Fade transition
+      const accent = getAccentVar(mode);
+      modePanel.style.transition = 'opacity 0.12s ease';
+      modePanel.style.opacity = activeMode && activeMode !== mode ? '0' : '1';
+
+      const render = () => {
+        activeMode = mode;
+        document.documentElement.style.setProperty('--active-accent', accent);
+
+        // Panel info
+        panelTitle.textContent = MODES[mode].title;
+        panelBullets.innerHTML = MODES[mode].bullets.map(b => '<li>' + escapeHtml(b) + '</li>').join('');
+        runBtn.textContent = cache[mode].status === 'loading' ? 'Running…' : MODES[mode].runLabel;
+        runBtn.disabled = cache[mode].status === 'loading' || isRunning;
+
+        // Output
+        renderOutput(mode);
+
+        modePanel.style.opacity = '1';
+      };
+
+      if (modePanel.style.opacity === '0') {
+        setTimeout(render, 120);
+      } else {
+        render();
+      }
+    }
+
+    function renderOutput(mode) {
+      const c = cache[mode];
+      if (c.status === 'idle') {
+        outputSection.innerHTML = '';
+        return;
+      }
+      if (c.status === 'loading') {
+        outputSection.innerHTML =
+          '<div class="output-loading"><span class="spinner"></span><span>Running ' + escapeHtml(MODES[mode].runLabel.replace('Run ', '').toLowerCase()) + '…</span></div>';
+        return;
+      }
+      outputSection.innerHTML = c.html;
+      // Re-attach copy hooks
+      c.copyHooks.forEach(({ btnId, codeId }) => {
+        const btn = document.getElementById(btnId);
+        const el  = document.getElementById(codeId);
+        if (btn && el) {
+          btn.addEventListener('click', () => {
+            navigator.clipboard.writeText(el.textContent || '').then(() => {
+              btn.textContent = 'Copied!';
+              setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
+            });
+          });
+        }
+      });
+    }
+
+    // ── Run ──
+    runBtn.addEventListener('click', e => {
+      addRipple(runBtn, e);
+      if (!activeMode || isRunning) return;
+      isRunning = true;
+      cache[activeMode].status = 'loading';
+      cache[activeMode].copyHooks = [];
+      runBtn.textContent = 'Running…';
+      runBtn.disabled = true;
+      renderOutput(activeMode);
+      vscode.postMessage({ type: 'startReview', modes: [activeMode] });
     });
 
-    // ── Message handler ──
+    // ── Messages from extension ──
     window.addEventListener('message', event => {
       const msg = event.data;
       switch (msg.type) {
-        case 'reviewing':
-          setState('reviewing');
+        case 'modeResult':
+          buildResultHtml(msg.mode, msg.data);
+          if (activeMode === msg.mode) renderOutput(msg.mode);
           break;
 
-        case 'result':
-          renderResult(msg.data);
-          setState('done');
+        case 'modeError':
+          cache[msg.mode].status = 'error';
+          cache[msg.mode].html = '<div class="error-box">' + escapeHtml(msg.message) + '</div>';
+          if (activeMode === msg.mode) renderOutput(msg.mode);
+          break;
+
+        case 'allDone':
+          isRunning = false;
+          if (activeMode) {
+            runBtn.textContent = MODES[activeMode].runLabel;
+            runBtn.disabled = false;
+          }
           break;
 
         case 'error':
-          renderError(msg.message || 'An unexpected error occurred.');
-          setState('done');
+          isRunning = false;
+          if (activeMode) {
+            cache[activeMode].status = 'error';
+            cache[activeMode].html = '<div class="error-box">' + escapeHtml(msg.message || 'An unexpected error occurred.') + '</div>';
+            renderOutput(activeMode);
+            runBtn.textContent = MODES[activeMode].runLabel;
+            runBtn.disabled = false;
+          }
           break;
       }
     });
 
-    // ── Renderers ──
-    function escapeHtml(str) {
-      return String(str)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;');
-    }
-
-    function severityBadge(severity) {
-      return '<span class="badge badge-' + severity + '">' + severity.toUpperCase() + '</span>';
-    }
-
-    function renderResult(data) {
+    // ── Build result HTML into cache ──
+    function buildResultHtml(mode, data) {
       const parts = [];
+      const hooks = [];
 
-      // Summary card
+      // Summary
       parts.push(
         '<div class="card">' +
-          '<div class="card-header">' +
-            '<span class="card-title">Summary</span>' +
-            '<span class="badge badge-mode">' + escapeHtml(selectedMode) + '</span>' +
-          '</div>' +
+          '<div class="card-header"><span class="card-title">Summary</span></div>' +
           '<p class="summary-text">' + escapeHtml(data.summary) + '</p>' +
         '</div>'
       );
@@ -561,98 +816,57 @@ function getWebviewContent(fileName: string, language: string): string {
       // Issues
       if (data.issues && data.issues.length > 0) {
         parts.push('<div class="section-label">Issues (' + data.issues.length + ')</div>');
-        for (const issue of data.issues) {
-          let issueHtml =
-            '<div class="card">' +
+        data.issues.forEach((issue, idx) => {
+          let html =
+            '<div class="card" style="animation-delay:' + (idx * 50) + 'ms">' +
               '<div class="card-header">' +
                 '<span class="card-title">' + escapeHtml(issue.type) + '</span>' +
-                severityBadge(issue.severity) +
+                '<span class="badge-sev badge-' + escapeHtml(issue.severity) + '">' + escapeHtml(issue.severity.toUpperCase()) + '</span>' +
               '</div>' +
-              '<p class="issue-description">' + escapeHtml(issue.description) + '</p>' +
+              '<p class="issue-desc">' + escapeHtml(issue.description) + '</p>' +
               '<div class="suggestion-box">' +
                 '<div class="suggestion-label">Suggestion</div>' +
                 escapeHtml(issue.suggestion) +
               '</div>';
-
           if (issue.code_fix) {
             const pre = document.createElement('pre');
             const code = document.createElement('code');
             code.textContent = issue.code_fix;
             pre.appendChild(code);
-            issueHtml += pre.outerHTML;
+            html += pre.outerHTML;
           }
-
-          issueHtml += '</div>';
-          parts.push(issueHtml);
-        }
+          html += '</div>';
+          parts.push(html);
+        });
       } else {
-        parts.push(
-          '<div class="card">' +
-            '<p class="no-issues">No issues found for this mode.</p>' +
-          '</div>'
-        );
+        parts.push('<div class="card"><p class="no-issues">No issues found.</p></div>');
       }
 
       // Refactored code
-      parts.push('<div class="section-label">Refactored Code</div>');
-      parts.push('<div class="card">');
-      parts.push(
-        '<div class="refactored-header">' +
-          '<span class="refactored-title">Improved Version</span>' +
-          '<button class="copy-btn" id="copy-btn">Copy</button>' +
-        '</div>'
-      );
+      const copyId = 'copy-' + mode;
+      const codeId = 'ref-' + mode;
       const refPre = document.createElement('pre');
       const refCode = document.createElement('code');
-      refCode.id = 'refactored-code-text';
+      refCode.id = codeId;
       refCode.textContent = data.refactored_code;
       refPre.appendChild(refCode);
-      parts.push(refPre.outerHTML);
-      parts.push('</div>');
 
-      // Try Again
-      parts.push('<button class="try-again-btn" id="try-again-btn">Try Again</button>');
+      parts.push('<div class="section-label">Refactored Code</div>');
+      parts.push(
+        '<div class="card">' +
+          '<div class="refactored-header">' +
+            '<span class="card-title">Improved Version</span>' +
+            '<button class="copy-btn" id="' + copyId + '">Copy</button>' +
+          '</div>' +
+          refPre.outerHTML +
+        '</div>'
+      );
 
-      resultEl.innerHTML = parts.join('');
+      hooks.push({ btnId: copyId, codeId });
 
-      // Copy button
-      const copyBtn = document.getElementById('copy-btn');
-      if (copyBtn) {
-        copyBtn.addEventListener('click', () => {
-          const codeEl = document.getElementById('refactored-code-text');
-          if (codeEl) {
-            navigator.clipboard.writeText(codeEl.textContent || '').then(() => {
-              copyBtn.textContent = 'Copied!';
-              setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500);
-            });
-          }
-        });
-      }
-
-      // Try Again button
-      const tryAgainBtn = document.getElementById('try-again-btn');
-      if (tryAgainBtn) {
-        tryAgainBtn.addEventListener('click', resetToIdle);
-      }
-    }
-
-    function renderError(message) {
-      resultEl.innerHTML =
-        '<div class="error-box">' + escapeHtml(message) + '</div>' +
-        '<button class="try-again-btn" id="try-again-btn">Try Again</button>';
-
-      const tryAgainBtn = document.getElementById('try-again-btn');
-      if (tryAgainBtn) {
-        tryAgainBtn.addEventListener('click', resetToIdle);
-      }
-    }
-
-    function resetToIdle() {
-      selectedMode = null;
-      document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('selected'));
-      runBtn.disabled = true;
-      resultEl.innerHTML = '';
-      setState('idle');
+      cache[mode].status = 'done';
+      cache[mode].html = parts.join('');
+      cache[mode].copyHooks = hooks;
     }
   </script>
 </body>
