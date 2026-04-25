@@ -1,4 +1,9 @@
 import * as vscode from 'vscode';
+import { exec } from 'child_process';
+import { readFile, existsSync, statSync } from 'fs';
+import { createHash } from 'crypto';
+import * as path from 'path';
+import { DiagnosisResult, ErrorPattern, ERROR_LIBRARY, extractLineNumber, diagnoseOutput } from './errorLibrary';
 
 const OLLAMA_URL = 'http://localhost:11434/api/generate';
 const OLLAMA_MODEL = 'qwen2.5-coder:7b';
@@ -44,6 +49,100 @@ function isReviewResult(val: unknown): val is ReviewResult {
 	return true;
 }
 
+// ── Debug Helper ─────────────────────────────────────────────────────────────
+
+// Keyed by filePath → { promise, mtime at compile start }.
+// If the file mtime hasn't changed we reuse the existing promise (cache hit).
+// If the file was saved since last compile we kick off a fresh compile.
+interface _BinEntry { p: Promise<string | null>; mtime: number; }
+const _binCache = new Map<string, _BinEntry>();
+// Stores compiler stderr when compilation fails, so we can diagnose it.
+const _compileStderr = new Map<string, string>();
+
+function compileToCache(compiler: string, filePath: string): Promise<string | null> {
+	let mtime = 0;
+	try { mtime = statSync(filePath).mtimeMs; } catch { return Promise.resolve(null); }
+
+	const entry = _binCache.get(filePath);
+	if (entry && entry.mtime === mtime) return entry.p; // file unchanged — reuse
+
+	const p = new Promise<string | null>(resolve => {
+		readFile(filePath, (err, content) => {
+			if (err) { resolve(null); return; }
+			const hash = createHash('md5').update(content).digest('hex').slice(0, 12);
+			const bin = `/tmp/dbg_${hash}`;
+			if (existsSync(bin)) { _compileStderr.delete(filePath); resolve(bin); return; }
+			exec(`${compiler} -o "${bin}"`, (_compErr, _stdout, stderr) => {
+				if (_compErr) { _compileStderr.set(filePath, stderr); resolve(null); }
+				else { _compileStderr.delete(filePath); resolve(bin); }
+			});
+		});
+	});
+
+	_binCache.set(filePath, { p, mtime });
+	return p;
+}
+
+// Resolves to a ready-to-run { cmd, cwd }, compiling C/C++ if needed.
+async function prepareRunCommand(language: string, filePath: string, workspaceRoot: string): Promise<{ cmd: string; cwd: string } | null> {
+	const dir = path.dirname(filePath);
+	const nameNoExt = path.basename(filePath).replace(/\.[^.]+$/, '');
+	const fp = filePath.replace(/"/g, '\\"');
+
+	switch (language) {
+		case 'javascript': return { cmd: `node "${fp}"`,                                      cwd: dir };
+		case 'typescript': return { cmd: `npx ts-node "${fp}"`,                               cwd: workspaceRoot };
+		case 'python':     return { cmd: `python3 "${fp}"`,                                   cwd: dir };
+		case 'go':         return { cmd: `go run "${fp}"`,                                    cwd: dir };
+		case 'rust':       return { cmd: `cargo run`,                                         cwd: workspaceRoot };
+		case 'java':       return { cmd: `javac "${fp}" && java -cp "${dir}" ${nameNoExt}`,   cwd: dir };
+		case 'c': {
+			const bin = await compileToCache(`gcc "${fp}"`, filePath);
+			return bin ? { cmd: `"${bin}"`, cwd: dir } : null;
+		}
+		case 'cpp': {
+			const bin = await compileToCache(`g++ "${fp}"`, filePath);
+			return bin ? { cmd: `"${bin}"`, cwd: dir } : null;
+		}
+		default: return null;
+	}
+}
+
+async function runDebugHelper(panel: vscode.WebviewPanel, language: string, filePath: string, workspaceRoot: string, ready: Promise<{ cmd: string; cwd: string } | null>): Promise<void> {
+	// Tell the webview we're compiling if the promise hasn't resolved yet
+	let resolved = false;
+	ready.then(() => { resolved = true; });
+	await Promise.resolve(); // flush microtask queue so the .then above can run
+	if (!resolved) {
+		panel.webview.postMessage({ type: 'debugStatus', message: 'Compiling…' });
+	}
+	const runCmd = await ready;
+
+	if (!runCmd) {
+		// Compilation failed — diagnose the compiler errors if we captured them
+		const compileErr = _compileStderr.get(filePath);
+		if (compileErr) {
+			const results = diagnoseOutput(compileErr, language);
+			panel.webview.postMessage({ type: 'debugResult', results });
+		} else {
+			panel.webview.postMessage({ type: 'debugResult', unsupported: true, language });
+		}
+		return;
+	}
+
+	exec(runCmd.cmd, { cwd: runCmd.cwd, timeout: 15000 }, (_err, _stdout, stderr) => {
+		const errOutput = stderr.trim();
+		if (!errOutput) {
+			panel.webview.postMessage({ type: 'debugResult', clean: true });
+			return;
+		}
+		const results = diagnoseOutput(errOutput, language);
+		panel.webview.postMessage({ type: 'debugResult', results });
+	});
+}
+
+// ── Extension ────────────────────────────────────────────────────────────────
+
 export function activate(context: vscode.ExtensionContext) {
 	const disposable = vscode.commands.registerCommand('code-review-bot.openReviewPanel', async () => {
 		const editor = vscode.window.activeTextEditor;
@@ -55,16 +154,22 @@ export function activate(context: vscode.ExtensionContext) {
 		const document = editor.document;
 		const selection = editor.selection;
 		const code = selection.isEmpty ? document.getText() : document.getText(selection);
-		const fileName = document.fileName.split('/').pop() || document.fileName;
+		const filePath = document.fileName;
+		const fileName = filePath.split('/').pop() || filePath;
 		const language = document.languageId;
+		const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? path.dirname(filePath);
 
-		createReviewPanel(code, fileName, language, context);
+		createReviewPanel(code, fileName, filePath, language, workspaceRoot, context);
 	});
 
 	context.subscriptions.push(disposable);
 }
 
-function createReviewPanel(code: string, fileName: string, language: string, context: vscode.ExtensionContext) {
+function createReviewPanel(
+	code: string, fileName: string, filePath: string,
+	language: string, workspaceRoot: string,
+	context: vscode.ExtensionContext
+) {
 	const panel = vscode.window.createWebviewPanel(
 		'codeReview',
 		`Review: ${fileName}`,
@@ -73,6 +178,19 @@ function createReviewPanel(code: string, fileName: string, language: string, con
 	);
 
 	panel.webview.html = getWebviewContent(fileName, language);
+
+	// Compile immediately when the panel opens.
+	let readyCmd = prepareRunCommand(language, filePath, workspaceRoot);
+
+	// Re-compile in the background every time the file is saved so the binary is
+	// ready before the user clicks "Run & Diagnose".
+	const fsWatcher = vscode.workspace.createFileSystemWatcher(
+		new vscode.RelativePattern(vscode.Uri.file(path.dirname(filePath)), path.basename(filePath))
+	);
+	fsWatcher.onDidChange(() => {
+		readyCmd = prepareRunCommand(language, filePath, workspaceRoot);
+	});
+	context.subscriptions.push(fsWatcher);
 
 	const listener = panel.webview.onDidReceiveMessage(msg => {
 		if (msg.type === 'startReview') {
@@ -84,6 +202,9 @@ function createReviewPanel(code: string, fileName: string, language: string, con
 				return;
 			}
 			runReviews(panel, code, language, modes);
+		}
+		if (msg.type === 'runDebug') {
+			runDebugHelper(panel, language, filePath, workspaceRoot, readyCmd);
 		}
 	});
 
@@ -185,6 +306,9 @@ function getWebviewContent(fileName: string, language: string): string {
       --bg-badge:        var(--vscode-badge-background);
       --bg-run-btn:      var(--vscode-button-background);
       --ripple-color:    rgba(255,255,255,0.12);
+
+      /* DEBUG HELPER */
+      --color-debug:     #7A1CAC;  /* debug section accent & header color  */
     }
     /* ============================================================== */
 
@@ -555,6 +679,110 @@ function getWebviewContent(fileName: string, language: string): string {
     @media (prefers-reduced-motion: reduce) {
       *, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
     }
+
+    /* ── Debug Helper ── */
+    #debug-section {
+      margin-top: 20px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+      background: var(--bg-panel);
+    }
+
+    #debug-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    #debug-header-left {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    #debug-title {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--color-debug);
+    }
+
+    #debug-sub {
+      font-size: 11px;
+      color: var(--fg-muted);
+      margin-top: 1px;
+    }
+
+    #debug-run-btn {
+      background: var(--color-debug);
+      color: #fff;
+      border: none;
+      border-radius: 5px;
+      padding: 6px 14px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      font-family: var(--vscode-font-family);
+      letter-spacing: 0.02em;
+      transition: opacity 0.15s ease, transform 0.15s ease;
+      flex-shrink: 0;
+    }
+
+    #debug-run-btn:hover:not(:disabled) { opacity: 0.82; transform: translateY(-1px); }
+    #debug-run-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+
+    #debug-output {
+      padding: 14px 18px;
+      font-size: 12px;
+      min-height: 44px;
+    }
+
+    .debug-result {
+      border-left: 3px solid var(--color-debug);
+      background: var(--bg-card);
+      border-radius: 0 5px 5px 0;
+      padding: 9px 12px;
+      margin-bottom: 9px;
+      animation: cardIn 0.2s ease both;
+    }
+
+    .debug-result.unknown {
+      border-left-color: var(--border);
+      opacity: 0.8;
+    }
+
+    .debug-result-line {
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--color-debug);
+      margin-bottom: 4px;
+      opacity: 0.8;
+    }
+
+    .debug-result.unknown .debug-result-line {
+      color: var(--fg-muted);
+    }
+
+    .debug-diagnosis {
+      line-height: 1.55;
+    }
+
+    .debug-raw {
+      font-family: var(--vscode-editor-font-family, monospace);
+      font-size: 0.87em;
+      color: var(--fg-muted);
+      margin-top: 5px;
+      word-break: break-all;
+    }
+
+    .debug-clean {
+      color: var(--fg-muted);
+      font-size: 12px;
+    }
   </style>
 </head>
 <body>
@@ -592,6 +820,20 @@ function getWebviewContent(fileName: string, language: string): string {
       <button id="run-btn">Run</button>
     </div>
     <div id="output-section"></div>
+  </div>
+
+  <!-- Debug Helper -->
+  <div id="debug-section">
+    <div id="debug-header">
+      <div id="debug-header-left">
+        <div>
+          <div id="debug-title">Debug Helper</div>
+          <div id="debug-sub">Explains errors and helps you debug them.</div>
+        </div>
+      </div>
+      <button id="debug-run-btn">Run &amp; Diagnose</button>
+    </div>
+    <div id="debug-output"></div>
   </div>
 
   <script>
@@ -868,6 +1110,62 @@ function getWebviewContent(fileName: string, language: string): string {
       cache[mode].html = parts.join('');
       cache[mode].copyHooks = hooks;
     }
+
+    // ── Debug Helper ──
+    const debugRunBtn  = document.getElementById('debug-run-btn');
+    const debugOutput  = document.getElementById('debug-output');
+
+    debugRunBtn.addEventListener('click', () => {
+      debugRunBtn.disabled = true;
+      debugRunBtn.textContent = 'Running…';
+      debugOutput.innerHTML = '<div class="output-loading"><span class="spinner"></span><span>Running file…</span></div>';
+      vscode.postMessage({ type: 'runDebug' });
+    });
+
+    window.addEventListener('message', event => {
+      const msg = event.data;
+      if (msg.type === 'debugStatus') {
+        debugOutput.innerHTML = '<div class="output-loading"><span class="spinner"></span><span>' + escapeHtml(msg.message) + '</span></div>';
+        return;
+      }
+      if (msg.type !== 'debugResult') return;
+
+      debugRunBtn.disabled = false;
+      debugRunBtn.textContent = 'Run & Diagnose';
+
+      if (msg.clean) {
+        debugOutput.innerHTML = '<p class="debug-clean">✓ No errors detected.</p>';
+        return;
+      }
+
+      if (msg.unsupported) {
+        debugOutput.innerHTML = '<p class="debug-clean">Running <strong>' + escapeHtml(msg.language) + '</strong> files is not supported yet.</p>';
+        return;
+      }
+
+      const results = msg.results || [];
+      if (results.length === 0) {
+        debugOutput.innerHTML = '<p class="debug-clean">No output captured.</p>';
+        return;
+      }
+
+      debugOutput.innerHTML = results.map((r, i) => {
+        const lineText = r.line !== null ? 'Line ' + r.line : 'Unknown line';
+        if (r.understood) {
+          return '<div class="debug-result" style="animation-delay:' + (i * 60) + 'ms">' +
+            '<div class="debug-result-line">' + escapeHtml(lineText) + '</div>' +
+            '<div class="debug-diagnosis">Based on the error messages, your error is most likely: <strong>' + escapeHtml(r.diagnosis) + '</strong></div>' +
+            '<div class="debug-raw">' + escapeHtml(r.errorText) + '</div>' +
+          '</div>';
+        } else {
+          return '<div class="debug-result unknown" style="animation-delay:' + (i * 60) + 'ms">' +
+            '<div class="debug-result-line">' + escapeHtml(lineText) + '</div>' +
+            '<div class="debug-diagnosis">Sorry, I do not understand this error message.</div>' +
+            '<div class="debug-raw">' + escapeHtml(r.errorText) + '</div>' +
+          '</div>';
+        }
+      }).join('');
+    });
   </script>
 </body>
 </html>`;
