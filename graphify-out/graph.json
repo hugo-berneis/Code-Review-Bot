@@ -1,0 +1,328 @@
+{
+  "directed": false,
+  "multigraph": false,
+  "graph": {},
+  "nodes": [
+    {
+      "label": "eslint.config.mjs",
+      "file_type": "code",
+      "source_file": "/Users/hugoberneis/code-review-bot/eslint.config.mjs",
+      "source_location": "L1",
+      "id": "users_hugoberneis_code_review_bot_eslint_config_mjs",
+      "community": 3,
+      "norm_label": "eslint.config.mjs"
+    },
+    {
+      "label": "errorLibrary.ts",
+      "file_type": "code",
+      "source_file": "/Users/hugoberneis/code-review-bot/src/errorLibrary.ts",
+      "source_location": "L1",
+      "id": "users_hugoberneis_code_review_bot_src_errorlibrary_ts",
+      "community": 1,
+      "norm_label": "errorlibrary.ts"
+    },
+    {
+      "label": "extractLineNumber()",
+      "file_type": "code",
+      "source_file": "/Users/hugoberneis/code-review-bot/src/errorLibrary.ts",
+      "source_location": "L1716",
+      "id": "errorlibrary_extractlinenumber",
+      "community": 1,
+      "norm_label": "extractlinenumber()"
+    },
+    {
+      "label": "diagnoseOutput()",
+      "file_type": "code",
+      "source_file": "/Users/hugoberneis/code-review-bot/src/errorLibrary.ts",
+      "source_location": "L1734",
+      "id": "errorlibrary_diagnoseoutput",
+      "community": 1,
+      "norm_label": "diagnoseoutput()"
+    },
+    {
+      "label": "extension.ts",
+      "file_type": "code",
+      "source_file": "/Users/hugoberneis/code-review-bot/src/extension.ts",
+      "source_location": "L1",
+      "id": "users_hugoberneis_code_review_bot_src_extension_ts",
+      "community": 0,
+      "norm_label": "extension.ts"
+    },
+    {
+      "label": "isReviewResult()",
+      "file_type": "code",
+      "source_file": "/Users/hugoberneis/code-review-bot/src/extension.ts",
+      "source_location": "L32",
+      "id": "extension_isreviewresult",
+      "community": 0,
+      "norm_label": "isreviewresult()"
+    },
+    {
+      "label": "getRunCommand()",
+      "file_type": "code",
+      "source_file": "/Users/hugoberneis/code-review-bot/src/extension.ts",
+      "source_location": "L52",
+      "id": "extension_getruncommand",
+      "community": 0,
+      "norm_label": "getruncommand()"
+    },
+    {
+      "label": "runDebugHelper()",
+      "file_type": "code",
+      "source_file": "/Users/hugoberneis/code-review-bot/src/extension.ts",
+      "source_location": "L70",
+      "id": "extension_rundebughelper",
+      "community": 0,
+      "norm_label": "rundebughelper()"
+    },
+    {
+      "label": "activate()",
+      "file_type": "code",
+      "source_file": "/Users/hugoberneis/code-review-bot/src/extension.ts",
+      "source_location": "L92",
+      "id": "extension_activate",
+      "community": 0,
+      "norm_label": "activate()"
+    },
+    {
+      "label": "createReviewPanel()",
+      "file_type": "code",
+      "source_file": "/Users/hugoberneis/code-review-bot/src/extension.ts",
+      "source_location": "L114",
+      "id": "extension_createreviewpanel",
+      "community": 2,
+      "norm_label": "createreviewpanel()"
+    },
+    {
+      "label": "runReviews()",
+      "file_type": "code",
+      "source_file": "/Users/hugoberneis/code-review-bot/src/extension.ts",
+      "source_location": "L147",
+      "id": "extension_runreviews",
+      "community": 0,
+      "norm_label": "runreviews()"
+    },
+    {
+      "label": "getWebviewContent()",
+      "file_type": "code",
+      "source_file": "/Users/hugoberneis/code-review-bot/src/extension.ts",
+      "source_location": "L183",
+      "id": "extension_getwebviewcontent",
+      "community": 2,
+      "norm_label": "getwebviewcontent()"
+    },
+    {
+      "label": "escapeHtml()",
+      "file_type": "code",
+      "source_file": "/Users/hugoberneis/code-review-bot/src/extension.ts",
+      "source_location": "L1103",
+      "id": "extension_escapehtml",
+      "community": 2,
+      "norm_label": "escapehtml()"
+    },
+    {
+      "label": "deactivate()",
+      "file_type": "code",
+      "source_file": "/Users/hugoberneis/code-review-bot/src/extension.ts",
+      "source_location": "L1107",
+      "id": "extension_deactivate",
+      "community": 0,
+      "norm_label": "deactivate()"
+    }
+  ],
+  "links": [
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "/Users/hugoberneis/code-review-bot/src/errorLibrary.ts",
+      "source_location": "L1716",
+      "weight": 1.0,
+      "_src": "users_hugoberneis_code_review_bot_src_errorlibrary_ts",
+      "_tgt": "errorlibrary_extractlinenumber",
+      "source": "users_hugoberneis_code_review_bot_src_errorlibrary_ts",
+      "target": "errorlibrary_extractlinenumber",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "/Users/hugoberneis/code-review-bot/src/errorLibrary.ts",
+      "source_location": "L1734",
+      "weight": 1.0,
+      "_src": "users_hugoberneis_code_review_bot_src_errorlibrary_ts",
+      "_tgt": "errorlibrary_diagnoseoutput",
+      "source": "users_hugoberneis_code_review_bot_src_errorlibrary_ts",
+      "target": "errorlibrary_diagnoseoutput",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "/Users/hugoberneis/code-review-bot/src/errorLibrary.ts",
+      "source_location": "L1750",
+      "weight": 1.0,
+      "_src": "errorlibrary_diagnoseoutput",
+      "_tgt": "errorlibrary_extractlinenumber",
+      "source": "errorlibrary_extractlinenumber",
+      "target": "errorlibrary_diagnoseoutput",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "/Users/hugoberneis/code-review-bot/src/extension.ts",
+      "source_location": "L32",
+      "weight": 1.0,
+      "_src": "users_hugoberneis_code_review_bot_src_extension_ts",
+      "_tgt": "extension_isreviewresult",
+      "source": "users_hugoberneis_code_review_bot_src_extension_ts",
+      "target": "extension_isreviewresult",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "/Users/hugoberneis/code-review-bot/src/extension.ts",
+      "source_location": "L52",
+      "weight": 1.0,
+      "_src": "users_hugoberneis_code_review_bot_src_extension_ts",
+      "_tgt": "extension_getruncommand",
+      "source": "users_hugoberneis_code_review_bot_src_extension_ts",
+      "target": "extension_getruncommand",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "/Users/hugoberneis/code-review-bot/src/extension.ts",
+      "source_location": "L70",
+      "weight": 1.0,
+      "_src": "users_hugoberneis_code_review_bot_src_extension_ts",
+      "_tgt": "extension_rundebughelper",
+      "source": "users_hugoberneis_code_review_bot_src_extension_ts",
+      "target": "extension_rundebughelper",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "/Users/hugoberneis/code-review-bot/src/extension.ts",
+      "source_location": "L92",
+      "weight": 1.0,
+      "_src": "users_hugoberneis_code_review_bot_src_extension_ts",
+      "_tgt": "extension_activate",
+      "source": "users_hugoberneis_code_review_bot_src_extension_ts",
+      "target": "extension_activate",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "/Users/hugoberneis/code-review-bot/src/extension.ts",
+      "source_location": "L114",
+      "weight": 1.0,
+      "_src": "users_hugoberneis_code_review_bot_src_extension_ts",
+      "_tgt": "extension_createreviewpanel",
+      "source": "users_hugoberneis_code_review_bot_src_extension_ts",
+      "target": "extension_createreviewpanel",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "/Users/hugoberneis/code-review-bot/src/extension.ts",
+      "source_location": "L147",
+      "weight": 1.0,
+      "_src": "users_hugoberneis_code_review_bot_src_extension_ts",
+      "_tgt": "extension_runreviews",
+      "source": "users_hugoberneis_code_review_bot_src_extension_ts",
+      "target": "extension_runreviews",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "/Users/hugoberneis/code-review-bot/src/extension.ts",
+      "source_location": "L183",
+      "weight": 1.0,
+      "_src": "users_hugoberneis_code_review_bot_src_extension_ts",
+      "_tgt": "extension_getwebviewcontent",
+      "source": "users_hugoberneis_code_review_bot_src_extension_ts",
+      "target": "extension_getwebviewcontent",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "/Users/hugoberneis/code-review-bot/src/extension.ts",
+      "source_location": "L1103",
+      "weight": 1.0,
+      "_src": "users_hugoberneis_code_review_bot_src_extension_ts",
+      "_tgt": "extension_escapehtml",
+      "source": "users_hugoberneis_code_review_bot_src_extension_ts",
+      "target": "extension_escapehtml",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "/Users/hugoberneis/code-review-bot/src/extension.ts",
+      "source_location": "L1107",
+      "weight": 1.0,
+      "_src": "users_hugoberneis_code_review_bot_src_extension_ts",
+      "_tgt": "extension_deactivate",
+      "source": "users_hugoberneis_code_review_bot_src_extension_ts",
+      "target": "extension_deactivate",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "/Users/hugoberneis/code-review-bot/src/extension.ts",
+      "source_location": "L170",
+      "weight": 1.0,
+      "_src": "extension_runreviews",
+      "_tgt": "extension_isreviewresult",
+      "source": "extension_isreviewresult",
+      "target": "extension_runreviews",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "/Users/hugoberneis/code-review-bot/src/extension.ts",
+      "source_location": "L71",
+      "weight": 1.0,
+      "_src": "extension_rundebughelper",
+      "_tgt": "extension_getruncommand",
+      "source": "extension_getruncommand",
+      "target": "extension_rundebughelper",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "/Users/hugoberneis/code-review-bot/src/extension.ts",
+      "source_location": "L126",
+      "weight": 1.0,
+      "_src": "extension_createreviewpanel",
+      "_tgt": "extension_getwebviewcontent",
+      "source": "extension_createreviewpanel",
+      "target": "extension_getwebviewcontent",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "/Users/hugoberneis/code-review-bot/src/extension.ts",
+      "source_location": "L723",
+      "weight": 1.0,
+      "_src": "extension_getwebviewcontent",
+      "_tgt": "extension_escapehtml",
+      "source": "extension_getwebviewcontent",
+      "target": "extension_escapehtml",
+      "confidence_score": 1.0
+    }
+  ],
+  "hyperedges": []
+}
