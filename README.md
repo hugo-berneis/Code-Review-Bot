@@ -1,71 +1,150 @@
-# code-review-bot README
+# code-review-bot
 
-This is the README for your extension "code-review-bot". After writing up a brief description, we recommend including the following sections.
-
-## Features
-
-Describe specific features of your extension including screenshots of your extension in action. Image paths are relative to this README file.
-
-For example if there is an image subfolder under your extension project workspace:
-
-\!\[feature X\]\(images/feature-x.png\)
-
-> Tip: Many popular extensions utilize animations. This is an excellent way to show off your extension! We recommend short, focused animations that are easy to follow.
-
-## Requirements
-
-If you have any requirements or dependencies, add a section describing those and how to install and configure them.
-
-## Extension Settings
-
-Include if your extension adds any VS Code settings through the `contributes.configuration` extension point.
-
-For example:
-
-This extension contributes the following settings:
-
-* `myExtension.enable`: Enable/disable this extension.
-* `myExtension.thing`: Set to `blah` to do something.
-
-## Known Issues
-
-Calling out known issues can help limit users opening duplicate issues against your extension.
-
-## Release Notes
-
-Users appreciate release notes as you update your extension.
-
-### 1.0.0
-
-Initial release of ...
-
-### 1.0.1
-
-Fixed issue #.
-
-### 1.1.0
-
-Added features X, Y, and Z.
+A VS Code extension built for developers who want instant feedback without leaving their editor. It combines an **AI-powered code reviewer** using a fully local model with a **pattern-based Debug Checker** that explains runtime errors. No internet connection, no API keys, no cost.
 
 ---
 
-## Following extension guidelines
+## Requirements
 
-Ensure that you've read through the extensions guidelines and follow the best practices for creating your extension.
+### 1. Download and install Ollama
 
-* [Extension Guidelines](https://code.visualstudio.com/api/references/extension-guidelines)
+Ollama runs the AI model locally on your machine.
 
-## Working with Markdown
+1. Go to [https://ollama.com](https://ollama.com) and download the installer for your OS
+2. Run the installer and follow the setup steps
+3. Once installed, open a terminal and start Ollama:
 
-You can author your README using Visual Studio Code. Here are some useful editor keyboard shortcuts:
+```bash
+ollama serve
+```
 
-* Split the editor (`Cmd+\` on macOS or `Ctrl+\` on Windows and Linux).
-* Toggle preview (`Shift+Cmd+V` on macOS or `Shift+Ctrl+V` on Windows and Linux).
-* Press `Ctrl+Space` (Windows, Linux, macOS) to see a list of Markdown snippets.
+4. Pull the model used by this extension:
 
-## For more information
+```bash
+ollama pull qwen2.5-coder:7b
+```
 
-* [Visual Studio Code's Markdown Support](http://code.visualstudio.com/docs/languages/markdown)
-* [Markdown Syntax Reference](https://help.github.com/articles/markdown-basics/)
+> The model is about 4.7 GB. It only needs to be downloaded once.
 
-**Enjoy!**
+### 2. Install the extension
+
+- Clone or download this repository
+- Open the folder in VS Code
+- Press `F5` to launch the Extension Development Host
+
+### 3. Open the panel
+
+- Open any source file
+- Press `Ctrl+Shift+P` (or `Cmd+Shift+P` on Mac) and run **Open Code Review**
+- The panel opens beside your editor
+
+> **Note:** If you switch to a file in a different language, close and reopen the panel so the language is detected correctly.
+
+---
+
+## Features
+
+### AI Code Review — C O D E bar
+
+Four review modes powered by `qwen2.5-coder:7b` running locally through Ollama. Select a mode and click **Run**.
+
+**C**: Clarify - Readability, naming, confusing logic 
+
+
+**O**: Oversight - Security vulnerabilities, unsafe operations 
+
+**D**: Documentation - Missing comments, unclear parameters, undocumented APIs 
+
+**E**: Efficiency - Performance bottlenecks, redundant operations, algorithmic improvements 
+
+- Results include a **summary**, per-issue cards with severity labels (`low` / `medium` / `high` / `critical`), and an improved version of your code with a **Copy** button
+- Each mode result is cached — switching tabs doesn't re-run
+- The panel **auto-saves** your file before running so it always reviews your latest code
+- No API key required — everything runs on your machine
+
+---
+
+### Debug Checker
+
+Runs your file and explains any errors found
+
+- Click **Run & Diagnose** to execute the file and scan stderr for known error patterns
+- The panel **auto-saves** before running so you always get results for your current code
+- Supports **384 error patterns** across 12 languages
+
+**Supported languages:**
+
+| Language | How it runs |
+|----------|-------------|
+| JavaScript | `node` |
+| TypeScript | `npx ts-node` |
+| Python | `python3` |
+| Go | `go run` |
+| Java | `javac` + `java` |
+| C | `gcc` + binary |
+| C++ | `g++` + binary |
+| Rust | `cargo run` |
+
+---
+
+### Cheatsheet
+
+A built-in quick reference for beginner programmers. The language is **auto-detected** from your open file.
+
+Select a topic from the dropdown to instantly see a code snippet with a **Copy** button.
+
+**Topics covered:**
+
+| | | |
+|---|---|---|
+| Character Output | User Input | Program Structure |
+| Conditionals | Comments | Relational Operators |
+| Compile & Execute | Random Number | Variables & Data Types |
+| Loops | Logical Operations | Arithmetic Operators |
+| Chaining | | |
+
+**Languages with cheatsheet support:**
+JavaScript, TypeScript, Python, Go, Java, C, C++, Rust, Ruby, PHP, C#, Kotlin, Swift, Bash/Shell
+
+---
+
+### Help & Common Issues
+
+A collapsible reference section at the bottom of the panel. Click **Open** to expand it.
+
+Covers the most common problems beginners run into:
+
+- What to do when switching languages
+- Why the Debug Checker may say "not supported"
+- Why C/C++ takes longer on the first run
+- What to do if Ollama isn't running
+- Why "No errors detected" doesn't mean the program is correct
+- What to do if results seem stale
+- Why programs that ask for keyboard input hang
+
+---
+
+## Known Issues
+
+- **Ollama must be running** for the AI review modes (C, O, D, E). The Debug Checker works completely offline.
+- **C/C++ with `#include <bits/stdc++.h>`** can take 10–15 seconds to compile on the first run. Subsequent runs are near-instant due to binary caching.
+- **Programs that read from stdin** (`input()`, `scanf()`, `readline()`, etc.) will hang in the Debug Checker until the 15-second timeout. Temporarily comment out input calls while debugging.
+- **Debug Checker reads stderr only** — logic errors that produce wrong output without crashing will not be detected. Use the AI review modes for logic analysis.
+- The extension panel is tied to the language of the file it was opened on. Reopen the panel when switching languages.
+
+---
+
+## Release Notes
+
+### 1.0.0
+
+Initial release.
+
+- AI code review via local Ollama (`qwen2.5-coder:7b`) with four modes: Clarify, Oversight, Documentation, Efficiency
+- Pattern-based Debug Checker with 384 error patterns across 12 languages
+- C/C++ binary cache with background pre-compilation
+- Beginner Cheatsheet for 14 languages across 13 topics
+- Help & Common Issues collapsible reference section
+- Auto-save before running review or debug
+- Ollama availability warning on panel open
+- Smooth entrance animations and hover effects (contained in `src/animations.ts` for easy removal)
