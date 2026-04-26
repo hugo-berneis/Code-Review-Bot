@@ -4,6 +4,7 @@ import { readFile, existsSync, statSync } from 'fs';
 import { createHash } from 'crypto';
 import * as path from 'path';
 import { DiagnosisResult, ErrorPattern, ERROR_LIBRARY, extractLineNumber, diagnoseOutput } from './errorLibrary';
+import { getAnimationStyles, getAnimationScripts } from './animations';
 
 const OLLAMA_URL = 'http://localhost:11434/api/generate';
 const OLLAMA_MODEL = 'qwen2.5-coder:7b';
@@ -25,7 +26,7 @@ interface Issue {
 interface ReviewResult {
 	summary: string;
 	issues: Issue[];
-	refactored_code: string;
+	refactored_code?: string;
 }
 
 //level of problem severity that need to be fixed
@@ -35,7 +36,7 @@ function isReviewResult(val: unknown): val is ReviewResult {
 	if (typeof val !== 'object' || val === null) return false;
 	const v = val as Record<string, unknown>;
 	if (typeof v.summary !== 'string') return false;
-	if (typeof v.refactored_code !== 'string') return false;
+	if (v.refactored_code !== undefined && typeof v.refactored_code !== 'string') return false;
 	if (!Array.isArray(v.issues)) return false;
 	for (const issue of v.issues) {
 		if (typeof issue !== 'object' || issue === null) return false;
@@ -49,7 +50,7 @@ function isReviewResult(val: unknown): val is ReviewResult {
 	return true;
 }
 
-// ── Debug Helper ─────────────────────────────────────────────────────────────
+// ── Debug Checker ────────────────────────────────────────────────────────────
 
 // Keyed by filePath → { promise, mtime at compile start }.
 // If the file mtime hasn't changed we reuse the existing promise (cache hit).
@@ -179,6 +180,15 @@ function createReviewPanel(
 
 	panel.webview.html = getWebviewContent(fileName, language);
 
+	// Warn if Ollama is not reachable (AI review modes won't work without it).
+	fetch('http://localhost:11434', { signal: AbortSignal.timeout(2000) })
+		.catch(() => {
+			vscode.window.showWarningMessage(
+				'Ollama is not running. AI review modes (C, O, D, E) require it. ' +
+				'Start it with: ollama serve'
+			);
+		});
+
 	// Compile immediately when the panel opens.
 	let readyCmd = prepareRunCommand(language, filePath, workspaceRoot);
 
@@ -201,10 +211,14 @@ function createReviewPanel(
 				panel.webview.postMessage({ type: 'error', message: 'No valid modes selected.' });
 				return;
 			}
-			runReviews(panel, code, language, modes);
+			// Auto-save and re-read so the review always uses the current in-editor version
+			const doc = vscode.workspace.textDocuments.find(d => d.fileName === filePath);
+			if (doc?.isDirty) { await doc.save(); }
+			const currentCode = doc ? doc.getText() : code;
+			runReviews(panel, currentCode, language, modes);
 		}
 		if (msg.type === 'runDebug') {
-			// Auto-save so the debug helper always runs the current in-editor version
+			// Auto-save so the debug checker always runs the current in-editor version
 			const doc = vscode.workspace.textDocuments.find(d => d.fileName === filePath);
 			if (doc?.isDirty) {
 				await doc.save();
@@ -2197,7 +2211,7 @@ function getWebviewContent(fileName: string, language: string): string {
       *, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
     }
 
-    /* ── Debug Helper ── */
+    /* ── Debug Checker ── */
     #debug-section {
       margin-top: 20px;
       border: 1px solid var(--border);
@@ -2371,6 +2385,85 @@ function getWebviewContent(fileName: string, language: string): string {
     #cheatsheet-unsupported {
       padding: 14px 18px;
     }
+
+    /* ── Help ── */
+    #help-section {
+      margin-top: 20px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+      background: var(--bg-panel);
+    }
+
+    #help-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 14px 18px;
+    }
+
+    #help-header.open {
+      border-bottom: 1px solid var(--border);
+    }
+
+    #help-title {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--fg-body);
+    }
+
+    #help-sub {
+      font-size: 11px;
+      color: var(--fg-muted);
+      margin-top: 1px;
+    }
+
+    #help-toggle-btn {
+      background: transparent;
+      color: var(--fg-body);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 4px 12px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      font-family: var(--vscode-font-family);
+      flex-shrink: 0;
+      transition: border-color 0.15s, opacity 0.15s;
+    }
+
+    #help-toggle-btn:hover { border-color: var(--border-focus); opacity: 0.85; }
+
+    #help-body:not([hidden]) {
+      padding: 14px 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .help-tip {
+      border-left: 3px solid var(--border);
+      background: var(--bg-card);
+      border-radius: 0 5px 5px 0;
+      padding: 9px 12px;
+    }
+
+    .help-tip-title {
+      font-size: 11px;
+      font-weight: 700;
+      margin-bottom: 4px;
+    }
+
+    .help-tip-body {
+      font-size: 11px;
+      color: var(--fg-muted);
+      line-height: 1.6;
+    }
+
+    .help-tip.tip-warn { border-left-color: var(--border-warn); }
+    .help-tip.tip-info { border-left-color: var(--border-focus); }
+    ${getAnimationStyles()}
   </style>
 </head>
 <body>
@@ -2410,13 +2503,13 @@ function getWebviewContent(fileName: string, language: string): string {
     <div id="output-section"></div>
   </div>
 
-  <!-- Debug Helper -->
+  <!-- Debug Checker -->
   <div id="debug-section">
     <div id="debug-header">
       <div id="debug-header-left">
         <div>
-          <div id="debug-title">Debug Helper</div>
-          <div id="debug-sub">Explains errors and helps you debug them.</div>
+          <div id="debug-title">Debug Checker</div>
+          <div id="debug-sub">Runs your file and explains any errors found.</div>
         </div>
       </div>
       <button id="debug-run-btn">Run &amp; Diagnose</button>
@@ -2443,6 +2536,86 @@ function getWebviewContent(fileName: string, language: string): string {
     </div>
     <div id="cheatsheet-unsupported" hidden>
       <p class="debug-clean">No cheatsheet available for <strong>${escapeHtml(language)}</strong> yet.</p>
+    </div>
+  </div>
+
+  <!-- Help -->
+  <div id="help-section">
+    <div id="help-header">
+      <div>
+        <div id="help-title">Help &amp; Common Issues</div>
+        <div id="help-sub">Things to try when something isn't working</div>
+      </div>
+      <button id="help-toggle-btn">Open</button>
+    </div>
+    <div id="help-body" hidden>
+
+      <div class="help-tip tip-warn">
+        <div class="help-tip-title">Switched languages? Restart the extension panel.</div>
+        <div class="help-tip-body">
+          If you opened the panel on a Python file and then switch to JavaScript (or any other language),
+          close this panel and reopen it with <strong>Open Code Review</strong> from the command palette.
+          The Debug Checker and Cheatsheet are tied to the language at panel-open time.
+        </div>
+      </div>
+
+      <div class="help-tip tip-warn">
+        <div class="help-tip-title">Debug Checker says "not supported" for my language.</div>
+        <div class="help-tip-body">
+          The Debug Checker can run: JavaScript, TypeScript, Python, Go, Java, C, C++, and Rust.
+          Make sure VS Code has detected the correct language and check the badge in the top-right of this panel.
+          If it shows the wrong language, set it manually via the language selector in VS Code's status bar.
+        </div>
+      </div>
+
+      <div class="help-tip tip-warn">
+        <div class="help-tip-title">C or C++ takes a long time before "Run &amp; Diagnose" works.</div>
+        <div class="help-tip-body">
+          C and C++ files must be compiled before they can run. Compilation starts automatically when
+          you open this panel. If you click "Run &amp; Diagnose" before it finishes, it will show
+          "Compiling…" and wait. Heavy headers like <code>#include &lt;bits/stdc++.h&gt;</code>
+          can take 10–15 seconds on the first run. Subsequent runs on the same file are near-instant.
+        </div>
+      </div>
+
+      <div class="help-tip tip-info">
+        <div class="help-tip-title">AI review isn't working (Ollama error).</div>
+        <div class="help-tip-body">
+          The C, O, D, E review modes need Ollama running locally. Make sure you have started it
+          (<code>ollama serve</code>) and that the model is pulled
+          (<code>ollama pull qwen2.5-coder:7b</code>). The Debug Checker does <em>not</em> need
+          Ollama — it works offline.
+        </div>
+      </div>
+
+      <div class="help-tip tip-info">
+        <div class="help-tip-title">Debug Checker shows "No errors detected" but my program is wrong.</div>
+        <div class="help-tip-body">
+          The checker only reads <strong>stderr</strong> (error output), not stdout or the exit code.
+          Logic errors that produce wrong output without crashing won't be caught here — use the
+          AI review modes (C, O, D, E) to analyse the logic instead.
+        </div>
+      </div>
+
+      <div class="help-tip tip-info">
+        <div class="help-tip-title">Errors are showing from a previous version of my file.</div>
+        <div class="help-tip-body">
+          The Debug Checker now auto-saves before running, so this should be rare. If you still see
+          stale results, save manually with <strong>Cmd+S</strong> (Mac) or <strong>Ctrl+S</strong>
+          (Windows/Linux) and click "Run &amp; Diagnose" again.
+        </div>
+      </div>
+
+      <div class="help-tip tip-info">
+        <div class="help-tip-title">My program expects keyboard input and hangs.</div>
+        <div class="help-tip-body">
+          The Debug Checker runs your file with a 15-second timeout and no interactive input.
+          If your program calls <code>input()</code>, <code>scanf()</code>, <code>readline()</code>,
+          or similar, it will hang until the timeout. Temporarily remove or comment out the input
+          calls while debugging, then add them back.
+        </div>
+      </div>
+
     </div>
   </div>
 
@@ -2694,34 +2867,36 @@ function getWebviewContent(fileName: string, language: string): string {
         parts.push('<div class="card"><p class="no-issues">No issues found.</p></div>');
       }
 
-      // Refactored code
-      const copyId = 'copy-' + mode;
-      const codeId = 'ref-' + mode;
-      const refPre = document.createElement('pre');
-      const refCode = document.createElement('code');
-      refCode.id = codeId;
-      refCode.textContent = data.refactored_code;
-      refPre.appendChild(refCode);
+      // Refactored code (model may omit this for some modes)
+      if (data.refactored_code) {
+        const copyId = 'copy-' + mode;
+        const codeId = 'ref-' + mode;
+        const refPre = document.createElement('pre');
+        const refCode = document.createElement('code');
+        refCode.id = codeId;
+        refCode.textContent = data.refactored_code;
+        refPre.appendChild(refCode);
 
-      parts.push('<div class="section-label">Refactored Code</div>');
-      parts.push(
-        '<div class="card">' +
-          '<div class="refactored-header">' +
-            '<span class="card-title">Improved Version</span>' +
-            '<button class="copy-btn" id="' + copyId + '">Copy</button>' +
-          '</div>' +
-          refPre.outerHTML +
-        '</div>'
-      );
+        parts.push('<div class="section-label">Refactored Code</div>');
+        parts.push(
+          '<div class="card">' +
+            '<div class="refactored-header">' +
+              '<span class="card-title">Improved Version</span>' +
+              '<button class="copy-btn" id="' + copyId + '">Copy</button>' +
+            '</div>' +
+            refPre.outerHTML +
+          '</div>'
+        );
 
-      hooks.push({ btnId: copyId, codeId });
+        hooks.push({ btnId: copyId, codeId });
+      }
 
       cache[mode].status = 'done';
       cache[mode].html = parts.join('');
       cache[mode].copyHooks = hooks;
     }
 
-    // ── Debug Helper ──
+    // ── Debug Checker ──
     const debugRunBtn  = document.getElementById('debug-run-btn');
     const debugOutput  = document.getElementById('debug-output');
 
@@ -2817,6 +2992,9 @@ function getWebviewContent(fileName: string, language: string): string {
         }
       }).join('');
     });
+
+    // ── Help toggle — handled by animations.ts ──
+    ${getAnimationScripts()}
   </script>
 </body>
 </html>`;
