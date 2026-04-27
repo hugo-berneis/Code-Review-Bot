@@ -1,5 +1,7 @@
 # code-review-bot
 
+[EXTENSION LINK](https://marketplace.visualstudio.com/items?itemName=hberneis.code-review-bot&ssr=false#overview)
+
 A VS Code extension built for developers who want instant feedback without leaving their editor. It combines an **AI-powered code reviewer** using a fully local model with a **pattern-based Debug Checker** that explains runtime errors. No internet connection and no API keys.
 
 ---

@@ -9,3 +9,7 @@ vsc-extension-quickstart.md
 **/*.map
 **/*.ts
 **/.vscode-test.*
+graphify-out/**
+.claude/**
+node_modules/**
+out/test/**

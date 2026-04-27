@@ -1,10 +1,25 @@
 {
   "name": "code-review-bot",
-  "displayName": "code-review-bot",
-  "description": "",
-  "version": "0.0.1",
+  "displayName": "Code Review Bot",
+  "description": "AI code review and debug checker that runs fully locally via Ollama. No API key or internet connection required.",
+  "version": "1.0.0",
+  "publisher": "hberneis",
+  "license": "MIT",
+  "icon": "icon.png",
+  "homepage": "https://hugoberneis.com",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hugoberneis/code-review-bot"
+  },
+  "keywords": [
+    "code review",
+    "ollama",
+    "ai",
+    "debug",
+    "local llm"
+  ],
   "engines": {
-    "vscode": "^1.110.0"
+    "vscode": "^1.115.0"
   },
   "categories": [
     "Other"
